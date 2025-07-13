@@ -1,0 +1,256 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+const char* SSID = "NETWORK_NAME";
+const char* PASSWORD = "NETWORK_PASSWORD";
+
+const char* geoAPI = "https://ipinfo.io/json";
+const String weatherAPIURL = "https://api.open-meteo.com/v1/forecast";
+const String weatherAPIUrlParams = "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m";
+
+const int buttonPin = 13;
+int displayIndex = 0;
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 200;
+
+unsigned long lastDisplayChange = 0;
+const unsigned long displayInterval = 3000;  // 3 seconds
+
+float latitude = 0.0;
+float longitude = 0.0;
+String city = "";
+
+String dateTime = "";
+String temperature = "";
+String relativeHumidity = "";
+String feelsLikeTemp = "";
+bool isDay = true;
+int weatherCode = 0;
+String surfacePressure = "";
+String windSpeed = "";
+String windDirection = "";
+
+
+byte sunChar[8] = { 0b00100, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00100, 0b00000 };
+byte cloudChar[8] = { 0b00000, 0b01110, 0b11111, 0b11111, 0b01110, 0b00000, 0b00000, 0b00000 };
+byte rainChar[8] = { 0b00000, 0b01110, 0b11111, 0b11111, 0b01110, 0b01010, 0b10101, 0b01010 };
+byte snowChar[8] = { 0b00100, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00100, 0b00000 };
+byte stormChar[8] = { 0b00100, 0b01100, 0b11110, 0b00110, 0b01100, 0b11110, 0b00100, 0b00000 };
+byte tempChar[8] = { 0b00100, 0b00100, 0b00100, 0b00100, 0b01110, 0b11111, 0b11111, 0b01110 };
+byte windChar[8] = { 0b00000, 0b10100, 0b11100, 0b00110, 0b00111, 0b00010, 0b00000, 0b00000 };
+byte dropChar[8] = { 0b00100, 0b00100, 0b00100, 0b01110, 0b01110, 0b01110, 0b00100, 0b00000 };
+
+
+HTTPClient http;
+void setup() {
+
+
+  Serial.begin(115200);
+  delay(1000);
+
+  pinMode(buttonPin, INPUT_PULLUP);
+
+  lcd.init();
+  lcd.backlight();
+
+  lcd.createChar(0, sunChar);
+  lcd.createChar(1, cloudChar);
+  lcd.createChar(2, rainChar);
+  lcd.createChar(3, snowChar);
+  lcd.createChar(4, stormChar);
+  lcd.createChar(5, tempChar);
+  lcd.createChar(6, windChar);
+  lcd.createChar(7, dropChar);
+
+  WiFi.begin(SSID, PASSWORD);
+
+  Serial.print("Starting connection to");
+  Serial.println(SSID);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(1000);
+  }
+
+  Serial.println("\nConnected to the WIFI network");
+  Serial.print("WiFi: ");
+  Serial.println(SSID);
+  Serial.print("ESP32 IP:");
+  Serial.println(WiFi.localIP());
+
+  getLocation();
+  getWeather();
+  updateDisplay();
+}
+
+void loop() {
+  static int lastButtonState = HIGH;
+  int reading = digitalRead(buttonPin);
+
+  if (reading == LOW && lastButtonState == HIGH && millis() - lastDebounceTime > debounceDelay) {
+    lastDebounceTime = millis();
+    displayIndex = (displayIndex + 1) % 8;
+    updateDisplay();
+    lastDisplayChange = millis(); // Reset timer so it doesn't immediately auto-advance again
+  }
+
+  if (millis() - lastDisplayChange > displayInterval) {
+    displayIndex = (displayIndex + 1) % 8;
+    updateDisplay();
+    lastDisplayChange = millis();
+  }
+
+  lastButtonState = reading;
+
+}
+
+void getLocation() {
+
+  http.begin(geoAPI);
+  int httpResponseCode = http.GET();
+  Serial.print("HTTP Response code:");
+  Serial.println(httpResponseCode);
+
+  if (httpResponseCode == 200) {
+    String payload = http.getString();
+    StaticJsonDocument<512> doc;
+    deserializeJson(doc, payload);
+    const char* loc = doc["loc"];
+    city = String(doc["city"]);
+
+
+    String locString = String(loc);
+    int commaIndex = locString.indexOf(',');
+
+    if (commaIndex != -1) {
+      String latStr = locString.substring(0, commaIndex);
+      String longStr = locString.substring(commaIndex + 1);
+
+      latitude = latStr.toFloat();
+      longitude = latStr.toFloat();
+    }
+
+    Serial.printf("Location: %f, %f\n", latitude, longitude);
+
+  } else {
+    Serial.printf("Error getting location: %d\n", httpResponseCode);
+  }
+  http.end();
+}
+//Full api url
+//https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m
+void getWeather() {
+  String fullApiUrl = weatherAPIURL + "?latitude=" + String(latitude, 6) + "&longitude=" + String(longitude, 6) + weatherAPIUrlParams;
+  Serial.println("FULL API URL:");
+  Serial.println(fullApiUrl);
+
+  http.begin(fullApiUrl);
+  int httpResponseCode = http.GET();
+  Serial.print("HTTP Response code from weather API:");
+  Serial.println(httpResponseCode);
+
+  if (httpResponseCode == 200) {
+
+    String payload = http.getString();
+    Serial.println(payload);
+
+    StaticJsonDocument<512> doc;
+    deserializeJson(doc, payload);
+
+
+    String timeStr = String(doc["current"]["time"]);
+    int tSeperatorIndex = timeStr.indexOf("T");
+
+    if (tSeperatorIndex != -1) {
+      dateTime = timeStr.substring(tSeperatorIndex + 1) + " " + timeStr.substring(0, tSeperatorIndex);
+    } else {
+      dateTime = "N/A";
+    }
+
+    temperature = String(doc["current"]["temperature_2m"]) + " " + String(doc["current_units"]["temperature_2m"]);
+    relativeHumidity = String(doc["current"]["relative_humidity_2m"]) + " " + String(doc["current_units"]["relative_humidity_2m"]);
+    feelsLikeTemp = String(doc["current"]["apparent_temperature"]) + " " + String(doc["current_units"]["apparent_temperature"]);
+    isDay = bool(doc["current"]["is_day"]);
+    weatherCode = int(doc["current"]["weatherCode"]);
+    surfacePressure = String(doc["current"]["surface_pressure"]) + " " + String(doc["current_units"]["surface_pressure"]);
+    windSpeed = String(doc["current"]["wind_speed_10m"]) + " " + String(doc["current_units"]["wind_speed_10m"]);
+    windDirection = String(doc["current"]["wind_direction_10m"]) + " " + String(doc["current_units"]["wind_direction_10m"]);
+
+    Serial.println(dateTime);
+    Serial.println(temperature);
+    Serial.println(relativeHumidity);
+    Serial.println(feelsLikeTemp);
+    Serial.println(isDay ? "Day" : "Night");
+    Serial.println(weatherCode);
+    Serial.println(surfacePressure);
+    Serial.println(windSpeed);
+    Serial.println(windDirection);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    
+
+  }
+}
+
+byte getWeatherChar(int code) {
+  if (code == 0) return 0;                                                      // Clear sky
+  else if (code <= 3 || code == 45 || code == 48) return 1;                     // Cloudy
+  else if (code <= 67 || (code >= 80 && code <= 82)) return 2;                  // Rain
+  else if ((code >= 71 && code <= 77) || (code >= 85 && code <= 86)) return 3;  // Snow
+  else if (code >= 95) return 4;                                                // Storm
+  else return 1;
+}
+
+String getWeatherDesc(int code) {
+  if (code == 0) return "Clear";
+  else if (code == 1 || code == 2 || code == 3) return "Cloudy";
+  else if (code == 45 || code == 48) return "Foggy";
+  else if (code == 51 || code == 53 || code == 55) return "Drizzle";
+  else if (code == 56 || code == 57) return "Fz Drizzle";
+  else if (code == 61 || code == 63 || code == 65) return "Rain";
+  else if (code == 66 || code == 67) return "Fz Rain";
+  else if (code == 71 || code == 73 || code == 75) return "Snow";
+  else if (code == 77) return "Snow G";
+  else if (code == 80 || code == 81 || code == 82) return "Showers";
+  else if (code == 85 || code == 86) return "S. Showers";
+  else if (code == 95) return "Storm";
+  else if (code == 96 || code == 99) return "Hail";
+  else return "Unknown";
+}
+
+void printTitleAndMessageToLcd(String title, String message) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(title);
+  lcd.setCursor(0, 1);
+  lcd.print(message);
+}
+
+
+void updateDisplay() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+
+  switch (displayIndex) {
+    case 0: lcd.print("Fetched:"); lcd.setCursor(0, 1); lcd.print(dateTime); break;
+    case 1: lcd.print("Approxite IP location:"); lcd.setCursor(0, 1); lcd.print(city); break;
+    case 2: lcd.print("Temp:"); lcd.setCursor(0, 1); lcd.print(temperature); break;
+    case 3: lcd.print("Humidity:"); lcd.setCursor(0, 1); lcd.print(relativeHumidity); break;
+    case 4: lcd.print("Feels like:"); lcd.setCursor(0, 1); lcd.print(feelsLikeTemp); break;
+    case 5: lcd.print("Time of day:"); lcd.setCursor(0, 1); lcd.print(isDay ? "Day" : "Night"); break;
+    case 6:
+      lcd.print("Weather:");
+      lcd.setCursor(0, 1);
+      lcd.write(getWeatherChar(weatherCode));
+      lcd.print(" ");
+      lcd.print(getWeatherDesc(weatherCode));
+      break;
+    case 7: lcd.print("Wind:"); lcd.setCursor(0, 1); lcd.print(windSpeed); break;
+  }
+}
